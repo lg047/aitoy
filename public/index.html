@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Mallow Plush — One-Button Speak</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; display: grid; place-items: center; min-height: 100vh; }
+    button { font-size: 20px; padding: 14px 20px; border-radius: 12px; border: 0; cursor: pointer; }
+    #status { margin-top: 12px; color: #444; font-size: 14px; text-align: center; }
+  </style>
+</head>
+<body>
+  <button id="speak">Hold to Speak</button>
+  <div id="status">Not connected</div>
+  <script>
+    const btn = document.getElementById("speak");
+    const statusEl = document.getElementById("status");
+
+    let pc;            // RTCPeerConnection
+    let micTrack;      // MediaStreamTrack
+    let dc;            // DataChannel (optional for events)
+    let connected = false;
+
+    async function ensureConnection() {
+      if (connected) return;
+
+      statusEl.textContent = "Connecting…";
+      // 1) Get ephemeral token from our server
+      const tokenRes = await fetch("/session");
+      const session = await tokenRes.json();
+      const EPHEMERAL_KEY = session?.client_secret?.value;
+      if (!EPHEMERAL_KEY) throw new Error("No ephemeral key");
+
+      // 2) Build WebRTC peer connection
+      pc = new RTCPeerConnection();
+
+      // 3) Remote audio from model → play out default system output (your teddy speaker)
+      const audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+
+      // 4) Local mic (AirPods) — use default input (set in macOS)
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micTrack = stream.getTracks()[0];
+      micTrack.enabled = false; // we’ll enable only while button is pressed
+      pc.addTrack(micTrack, stream);
+
+      // 5) Optional data channel for logging
+      dc = pc.createDataChannel("oai-events");
+      dc.onmessage = (e) => console.log("OAI:", e.data);
+
+      // 6) Offer/Answer with OpenAI Realtime
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03`, {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          "Authorization": `Bearer ${EPHEMERAL_KEY}`,
+          "Content-Type": "application/sdp"
+        }
+      });
+      const answer = { type: "answer", sdp: await sdpResponse.text() };
+      await pc.setRemoteDescription(answer);
+
+      pc.addEventListener("connectionstatechange", () => {
+        statusEl.textContent = "Connection: " + pc.connectionState;
+      });
+
+      connected = true;
+      statusEl.textContent = "Connected. Hold the button to talk.";
+    }
+
+    // Push-to-talk UX: hold = mic on, release = mic off
+    btn.addEventListener("mousedown", async () => {
+      await ensureConnection();
+      if (micTrack) micTrack.enabled = true;
+      btn.textContent = "Listening… (release to stop)";
+    });
+    btn.addEventListener("mouseup", () => {
+      if (micTrack) micTrack.enabled = false;
+      btn.textContent = "Hold to Speak";
+    });
+    btn.addEventListener("touchstart", async (e) => { e.preventDefault(); btn.dispatchEvent(new Event("mousedown")); });
+    btn.addEventListener("touchend",   (e) => { e.preventDefault(); btn.dispatchEvent(new Event("mouseup")); });
+  </script>
+</body>
+</html>
